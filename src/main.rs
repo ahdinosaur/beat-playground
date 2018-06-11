@@ -1,151 +1,123 @@
-extern crate jack;
-extern crate sample;
+//! A demonstration of constructing and using a blocking stream.
+//!
+//! Audio from the default input device is passed directly to the default output device in a duplex
+//! stream, so beware of feedback!
 
-use std::io;
+extern crate sample;
+extern crate portaudio;
+
+use portaudio as pa;
+use std::collections::VecDeque;
+
+
+const SAMPLE_RATE: f64 = 44_100.0;
+const CHANNELS: i32 = 2;
+const FRAMES: u32 = 256;
+const INTERLEAVED: bool = true;
+
 
 fn main() {
-    // Create client
-    let (client, _status) =
-        jack::Client::new("rust_jack_simple", jack::ClientOptions::empty()).unwrap();
-
-    let ports = client.ports(None, None, jack::PortFlags::empty());
-    println!("{:?}", ports);
-
-    let in_1 = client
-        .register_port("rust_in_l", jack::AudioIn::default())
-        .unwrap();
-    let system_in_1 = client
-        .port_by_name("system:capture_1")
-        .unwrap();
-
-    let in_2 = client
-        .register_port("rust_in_r", jack::AudioIn::default())
-        .unwrap();
-    let system_in_2 = client
-        .port_by_name("system:capture_2")
-        .unwrap();
-    //client.connect_ports(system_in_1
-
-
-    let process_callback = move |_: &jack::Client, ps: &jack::ProcessScope| -> jack::Control {
-        let in_1_p = in_1.as_slice(ps);
-        let in_2_p = in_2.as_slice(ps);
-        let system_in_1_p = system_in_1.as_slice(ps);
-        jack::Control::Continue
-    };
-
-    let process = jack::ClosureProcessHandler::new(process_callback);
-
-    // Activate the client, which starts the processing.
-    let active_client = client.activate_async(Notifications, process).unwrap();
-
-
-
-    // Wait for user input to quit
-    println!("Press enter/return to quit...");
-    let mut user_input = String::new();
-    io::stdin().read_line(&mut user_input).ok();
-
-    active_client.deactivate().unwrap();
+    match run() {
+        Ok(_) => {},
+        e => {
+            eprintln!("Example failed with the following: {:?}", e);
+        }
+    }
 }
 
-struct Notifications;
+fn run() -> Result<(), pa::Error> {
 
-impl jack::NotificationHandler for Notifications {
-    fn thread_init(&self, _: &jack::Client) {
-        println!("JACK: thread init");
-    }
+    let pa = try!(pa::PortAudio::new());
 
-    fn shutdown(&mut self, status: jack::ClientStatus, reason: &str) {
-        println!(
-            "JACK: shutdown with status {:?} because \"{}\"",
-            status, reason
-        );
-    }
+    println!("PortAudio");
+    println!("version: {}", pa.version());
+    println!("version text: {:?}", pa.version_text());
+    println!("host count: {}", try!(pa.host_api_count()));
 
-    fn freewheel(&mut self, _: &jack::Client, is_enabled: bool) {
-        println!(
-            "JACK: freewheel mode is {}",
-            if is_enabled { "on" } else { "off" }
-        );
-    }
+    let default_host = try!(pa.default_host_api());
+    println!("default host: {:#?}", pa.host_api_info(default_host));
 
-    fn buffer_size(&mut self, _: &jack::Client, sz: jack::Frames) -> jack::Control {
-        println!("JACK: buffer size changed to {}", sz);
-        jack::Control::Continue
-    }
+    let def_input = try!(pa.default_input_device());
+    let input_info = try!(pa.device_info(def_input));
+    println!("Default input device info: {:#?}", &input_info);
 
-    fn sample_rate(&mut self, _: &jack::Client, srate: jack::Frames) -> jack::Control {
-        println!("JACK: sample rate changed to {}", srate);
-        jack::Control::Continue
-    }
+    // Construct the input stream parameters.
+    let latency = input_info.default_low_input_latency;
+    let input_params = pa::StreamParameters::<f32>::new(def_input, CHANNELS, INTERLEAVED, latency);
 
-    fn client_registration(&mut self, _: &jack::Client, name: &str, is_reg: bool) {
-        println!(
-            "JACK: {} client with name \"{}\"",
-            if is_reg { "registered" } else { "unregistered" },
-            name
-        );
-    }
+    let def_output = try!(pa.default_output_device());
+    let output_info = try!(pa.device_info(def_output));
+    println!("Default output device info: {:#?}", &output_info);
 
-    fn port_registration(&mut self, _: &jack::Client, port_id: jack::PortId, is_reg: bool) {
-        println!(
-            "JACK: {} port with id {}",
-            if is_reg { "registered" } else { "unregistered" },
-            port_id
-        );
-    }
+    // Construct the output stream parameters.
+    let latency = output_info.default_low_output_latency;
+    let output_params = pa::StreamParameters::<f32>::new(def_output, CHANNELS, INTERLEAVED, latency);
 
-    fn port_rename(
-        &mut self,
-        _: &jack::Client,
-        port_id: jack::PortId,
-        old_name: &str,
-        new_name: &str,
-    ) -> jack::Control {
-        println!(
-            "JACK: port with id {} renamed from {} to {}",
-            port_id, old_name, new_name
-        );
-        jack::Control::Continue
-    }
+    // Check that the stream format is supported.
+    try!(pa.is_duplex_format_supported(input_params, output_params, SAMPLE_RATE));
 
-    fn ports_connected(
-        &mut self,
-        _: &jack::Client,
-        port_id_a: jack::PortId,
-        port_id_b: jack::PortId,
-        are_connected: bool,
-    ) {
-        println!(
-            "JACK: ports with id {} and {} are {}",
-            port_id_a,
-            port_id_b,
-            if are_connected {
-                "connected"
-            } else {
-                "disconnected"
+    // Construct the settings with which we'll open our duplex stream.
+    let settings = pa::DuplexStreamSettings::new(input_params, output_params, SAMPLE_RATE, FRAMES);
+
+    let mut stream = try!(pa.open_blocking_stream(settings));
+
+    // We'll use this buffer to transfer samples from the input stream to the output stream.
+    let mut buffer: VecDeque<f32> = VecDeque::with_capacity(FRAMES as usize * CHANNELS as usize);
+
+    try!(stream.start());
+
+    // We'll use this function to wait for read/write availability.
+    fn wait_for_stream<F>(f: F, name: &str) -> u32
+        where F: Fn() -> Result<pa::StreamAvailable, pa::error::Error>
+    {
+        'waiting_for_stream: loop {
+            match f() {
+                Ok(available) => match available {
+                    pa::StreamAvailable::Frames(frames) => return frames as u32,
+                    pa::StreamAvailable::InputOverflowed => println!("Input stream has overflowed"),
+                    pa::StreamAvailable::OutputUnderflowed => println!("Output stream has underflowed"),
+                },
+                Err(err) => panic!("An error occurred while waiting for the {} stream: {}", name, err),
             }
-        );
+        }
+    };
+
+    // Now start the main read/write loop! In this example, we pass the input buffer directly to
+    // the output buffer, so watch out for feedback.
+    'stream: loop {
+
+        // How many frames are available on the input stream?
+        let in_frames = wait_for_stream(|| stream.read_available(), "Read");
+
+        // If there are frames available, let's take them and add them to our buffer.
+        if in_frames > 0 {
+            let input_samples = try!(stream.read(in_frames));
+            buffer.extend(input_samples.into_iter());
+            println!("Read {:?} frames from the input stream.", in_frames);
+        }
+
+        // How many frames are available for writing on the output stream?
+        let out_frames = wait_for_stream(|| stream.write_available(), "Write");
+
+        // How many frames do we have so far?
+        let buffer_frames = (buffer.len() / CHANNELS as usize) as u32;
+
+        // If there are frames available for writing and we have some to write, then write!
+        if out_frames > 0 && buffer_frames > 0 {
+
+            // If we have more than enough frames for writing, take them from the start of the buffer.
+            // Otherwise if we have less, just take what we can for now.
+            let write_frames = if buffer_frames >= out_frames { out_frames } else { buffer_frames };
+            let n_write_samples = write_frames as usize * CHANNELS as usize;
+
+            try!(stream.write(write_frames, |output| {
+                for i in 0..n_write_samples {
+                    output[i] = buffer.pop_front().unwrap();
+                }
+                println!("Wrote {:?} frames to the output stream.", out_frames);
+            }));
+        }
+
     }
 
-    fn graph_reorder(&mut self, _: &jack::Client) -> jack::Control {
-        println!("JACK: graph reordered");
-        jack::Control::Continue
-    }
-
-    fn xrun(&mut self, _: &jack::Client) -> jack::Control {
-        println!("JACK: xrun occurred");
-        jack::Control::Continue
-    }
-
-    fn latency(&mut self, _: &jack::Client, mode: jack::LatencyType) {
-        println!(
-            "JACK: {} latency has changed",
-            match mode {
-                jack::LatencyType::Capture => "capture",
-                jack::LatencyType::Playback => "playback",
-            }
-        );
-    }
 }

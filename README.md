@@ -1,3 +1,3 @@
 ```
-sudo apt install libjack-jackd2-dev
+sudo apt install portaudio19-dev
 ```
