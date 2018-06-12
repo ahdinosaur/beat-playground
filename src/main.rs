@@ -1,18 +1,19 @@
-//! A demonstration of constructing and using a blocking stream.
+//! A demonstration of recording input
 //!
-//! Audio from the default input device is passed directly to the default output device in a duplex
-//! stream, so beware of feedback!
+//! Audio from the default input device is recorded into memory until
+//! the user presses Enter. They are then played back to the default
+//! output device.
 
-extern crate sample;
 extern crate portaudio;
 
 use portaudio as pa;
-use std::collections::VecDeque;
-
+use std::io;
+use std::thread;
+use std::time::Duration;
 
 const SAMPLE_RATE: f64 = 44_100.0;
-const CHANNELS: i32 = 2;
 const FRAMES: u32 = 256;
+const CHANNELS: i32 = 2;
 const INTERLEAVED: bool = true;
 
 
@@ -29,7 +30,7 @@ fn run() -> Result<(), pa::Error> {
 
     let pa = try!(pa::PortAudio::new());
 
-    println!("PortAudio");
+    println!("PortAudio:");
     println!("version: {}", pa.version());
     println!("version text: {:?}", pa.version_text());
     println!("host count: {}", try!(pa.host_api_count()));
@@ -45,79 +46,53 @@ fn run() -> Result<(), pa::Error> {
     let latency = input_info.default_low_input_latency;
     let input_params = pa::StreamParameters::<f32>::new(def_input, CHANNELS, INTERLEAVED, latency);
 
-    let def_output = try!(pa.default_output_device());
-    let output_info = try!(pa.device_info(def_output));
-    println!("Default output device info: {:#?}", &output_info);
-
-    // Construct the output stream parameters.
-    let latency = output_info.default_low_output_latency;
-    let output_params = pa::StreamParameters::<f32>::new(def_output, CHANNELS, INTERLEAVED, latency);
-
     // Check that the stream format is supported.
-    try!(pa.is_duplex_format_supported(input_params, output_params, SAMPLE_RATE));
+    try!(pa.is_input_format_supported(input_params, SAMPLE_RATE));
 
-    // Construct the settings with which we'll open our duplex stream.
-    let settings = pa::DuplexStreamSettings::new(input_params, output_params, SAMPLE_RATE, FRAMES);
+    // Construct the settings with which we'll open our input stream.
+    let input_settings = pa::InputStreamSettings::new(input_params, SAMPLE_RATE, FRAMES);
 
-    let mut stream = try!(pa.open_blocking_stream(settings));
+    // We'll use this channel to send the samples back to the main thread.
+    let (sender, receiver) = ::std::sync::mpsc::channel();
 
-    // We'll use this buffer to transfer samples from the input stream to the output stream.
-    let mut buffer: VecDeque<f32> = VecDeque::with_capacity(FRAMES as usize * CHANNELS as usize);
+    // A callback to pass to the non-blocking input stream.
+    let input_callback = move |pa::InputStreamCallbackArgs { buffer, frames, flags, time }| {
+        assert!(frames == FRAMES as usize);
+        // get start time of callback
+        //
+        // get end time of callbac
+        //
+        // time of sample is time.now + time.buffer_adc
 
-    try!(stream.start());
+        println!("time: {:?}", time);
+        println!("flags: {}", flags);
 
-    // We'll use this function to wait for read/write availability.
-    fn wait_for_stream<F>(f: F, name: &str) -> u32
-        where F: Fn() -> Result<pa::StreamAvailable, pa::error::Error>
-    {
-        'waiting_for_stream: loop {
-            match f() {
-                Ok(available) => match available {
-                    pa::StreamAvailable::Frames(frames) => return frames as u32,
-                    pa::StreamAvailable::InputOverflowed => println!("Input stream has overflowed"),
-                    pa::StreamAvailable::OutputUnderflowed => println!("Output stream has underflowed"),
-                },
-                Err(err) => panic!("An error occurred while waiting for the {} stream: {}", name, err),
-            }
+        // We'll construct a copy of the input buffer and send that
+        // onto the channel. This doesn't block, even though nothing
+        // is waiting on the receiver yet.
+        let vec_buffer = Vec::from(buffer);
+        // There are actually 512 samples here. 256 for the left, 256 for the right.
+        assert!(vec_buffer.len() == FRAMES as usize * CHANNELS as usize);
+
+        // If sending fails (the receiver has been dropped), stop recording
+        match sender.send(vec_buffer) {
+            Ok(_) => pa::Continue,
+            Err(_) => pa::Complete
         }
     };
 
-    // Now start the main read/write loop! In this example, we pass the input buffer directly to
-    // the output buffer, so watch out for feedback.
-    'stream: loop {
+    // Construct a stream with input sample types of f32.
+    let mut input_stream = try!(pa.open_non_blocking_stream(input_settings, input_callback));
 
-        // How many frames are available on the input stream?
-        let in_frames = wait_for_stream(|| stream.read_available(), "Read");
+    try!(input_stream.start());
 
-        // If there are frames available, let's take them and add them to our buffer.
-        if in_frames > 0 {
-            let input_samples = try!(stream.read(in_frames));
-            buffer.extend(input_samples.into_iter());
-            println!("Read {:?} frames from the input stream.", in_frames);
-        }
+    println!("Recording has started. Press Enter to stop.");
+    
+    // Wait for enter to be pressed
+    let mut buffer = String::new();
+    io::stdin().read_line(&mut buffer).ok();
 
-        // How many frames are available for writing on the output stream?
-        let out_frames = wait_for_stream(|| stream.write_available(), "Write");
+    try!(input_stream.stop());
 
-        // How many frames do we have so far?
-        let buffer_frames = (buffer.len() / CHANNELS as usize) as u32;
-
-        // If there are frames available for writing and we have some to write, then write!
-        if out_frames > 0 && buffer_frames > 0 {
-
-            // If we have more than enough frames for writing, take them from the start of the buffer.
-            // Otherwise if we have less, just take what we can for now.
-            let write_frames = if buffer_frames >= out_frames { out_frames } else { buffer_frames };
-            let n_write_samples = write_frames as usize * CHANNELS as usize;
-
-            try!(stream.write(write_frames, |output| {
-                for i in 0..n_write_samples {
-                    output[i] = buffer.pop_front().unwrap();
-                }
-                println!("Wrote {:?} frames to the output stream.", out_frames);
-            }));
-        }
-
-    }
-
+    Ok(())
 }
