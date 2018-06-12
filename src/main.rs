@@ -1,19 +1,17 @@
-//! A demonstration of recording input
+//! A demonstration of constructing and using a blocking stream.
 //!
-//! Audio from the default input device is recorded into memory until
-//! the user presses Enter. They are then played back to the default
-//! output device.
+//! Audio from the default input device is passed directly to the default output device in a duplex
+//! stream, so beware of feedback!
 
 extern crate portaudio;
 
 use portaudio as pa;
-use std::io;
-use std::thread;
-use std::time::Duration;
+use std::collections::VecDeque;
+
 
 const SAMPLE_RATE: f64 = 44_100.0;
-const FRAMES: u32 = 256;
 const CHANNELS: i32 = 2;
+const FRAMES: u32 = 256;
 const INTERLEAVED: bool = true;
 
 
@@ -30,7 +28,7 @@ fn run() -> Result<(), pa::Error> {
 
     let pa = try!(pa::PortAudio::new());
 
-    println!("PortAudio:");
+    println!("PortAudio");
     println!("version: {}", pa.version());
     println!("version text: {:?}", pa.version_text());
     println!("host count: {}", try!(pa.host_api_count()));
@@ -49,50 +47,49 @@ fn run() -> Result<(), pa::Error> {
     // Check that the stream format is supported.
     try!(pa.is_input_format_supported(input_params, SAMPLE_RATE));
 
-    // Construct the settings with which we'll open our input stream.
-    let input_settings = pa::InputStreamSettings::new(input_params, SAMPLE_RATE, FRAMES);
+    // Construct the settings with which we'll open our duplex stream.
+    let settings = pa::InputStreamSettings::new(input_params, SAMPLE_RATE, FRAMES);
 
-    // We'll use this channel to send the samples back to the main thread.
-    let (sender, receiver) = ::std::sync::mpsc::channel();
+    let mut stream = try!(pa.open_blocking_stream(settings));
 
-    // A callback to pass to the non-blocking input stream.
-    let input_callback = move |pa::InputStreamCallbackArgs { buffer, frames, flags, time }| {
-        assert!(frames == FRAMES as usize);
-        // get start time of callback
-        //
-        // get end time of callbac
-        //
-        // time of sample is time.now + time.buffer_adc
+    // We'll use this buffer to transfer samples from the input stream to the output stream.
+    let mut buffer: VecDeque<f32> = VecDeque::with_capacity(FRAMES as usize * CHANNELS as usize);
 
-        println!("time: {:?}", time);
-        println!("flags: {}", flags);
+    try!(stream.start());
 
-        // We'll construct a copy of the input buffer and send that
-        // onto the channel. This doesn't block, even though nothing
-        // is waiting on the receiver yet.
-        let vec_buffer = Vec::from(buffer);
-        // There are actually 512 samples here. 256 for the left, 256 for the right.
-        assert!(vec_buffer.len() == FRAMES as usize * CHANNELS as usize);
-
-        // If sending fails (the receiver has been dropped), stop recording
-        match sender.send(vec_buffer) {
-            Ok(_) => pa::Continue,
-            Err(_) => pa::Complete
+    // We'll use this function to wait for read/write availability.
+    fn wait_for_stream<F>(f: F, name: &str) -> u32
+        where F: Fn() -> Result<pa::StreamAvailable, pa::error::Error>
+    {
+        'waiting_for_stream: loop {
+            match f() {
+                Ok(available) => match available {
+                    pa::StreamAvailable::Frames(frames) => return frames as u32,
+                    pa::StreamAvailable::InputOverflowed => println!("Input stream has overflowed"),
+                    pa::StreamAvailable::OutputUnderflowed => println!("Output stream has underflowed"),
+                },
+                Err(err) => panic!("An error occurred while waiting for the {} stream: {}", name, err),
+            }
         }
     };
 
-    // Construct a stream with input sample types of f32.
-    let mut input_stream = try!(pa.open_non_blocking_stream(input_settings, input_callback));
+    // Now start the main read/write loop! In this example, we pass the input buffer directly to
+    // the output buffer, so watch out for feedback.
+    'stream: loop {
 
-    try!(input_stream.start());
+        // How many frames are available on the input stream?
+        let in_frames = wait_for_stream(|| stream.read_available(), "Read");
 
-    println!("Recording has started. Press Enter to stop.");
-    
-    // Wait for enter to be pressed
-    let mut buffer = String::new();
-    io::stdin().read_line(&mut buffer).ok();
+        // If there are frames available, let's take them and add them to our buffer.
+        if in_frames > 0 {
+            let input_samples = try!(stream.read(in_frames));
+            buffer.extend(input_samples.into_iter());
+            println!("Read {:?} frames from the input stream.", in_frames);
+            println!("Time: {}", stream.time());
+        }
 
-    try!(input_stream.stop());
+        // How many frames do we have so far?
+        let buffer_frames = (buffer.len() / CHANNELS as usize) as u32;
+    }
 
-    Ok(())
 }
