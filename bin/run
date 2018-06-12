@@ -1,0 +1,11 @@
+#!/bin/bash
+
+systemctl --user stop pulseaudio.socket
+systemctl --user stop pulseaudio.service
+echo "autospawn = no" > $HOME/.config/pulse/client.conf
+pulseaudio --kill
+cargo run
+rm $HOME/.config/pulse/client.conf
+systemctl --user start pulseaudio.socket
+systemctl --user start pulseaudio.service
+# pulseaudio --start
