@@ -4,16 +4,18 @@
 //! stream, so beware of feedback!
 
 extern crate portaudio;
+extern crate sample;
 
 use portaudio as pa;
+use sample::{Sample, Signal, signal};
+use sample::ring_buffer;
 use std::collections::VecDeque;
-
 
 const SAMPLE_RATE: f64 = 44_100.0;
 const CHANNELS: i32 = 2;
 const FRAMES: u32 = 256;
 const INTERLEAVED: bool = true;
-
+const MAX_SAMPLES_PER_BEAT: usize = 1024;
 
 fn main() {
     match run() {
@@ -52,8 +54,8 @@ fn run() -> Result<(), pa::Error> {
 
     let mut stream = try!(pa.open_blocking_stream(settings));
 
-    // We'll use this buffer to transfer samples from the input stream to the output stream.
-    let mut buffer: VecDeque<f32> = VecDeque::with_capacity(FRAMES as usize * CHANNELS as usize);
+    // read samples into a ring_buffer: https://github.com/RustAudio/sample/blob/master/src/ring_buffer.rs
+    let mut buffer = ring_buffer::Fixed::from([Sample::equilibrium(); MAX_SAMPLES_PER_BEAT * CHANNELS as usize]);
 
     try!(stream.start());
 
@@ -73,23 +75,28 @@ fn run() -> Result<(), pa::Error> {
         }
     };
 
+    let mut i = 0;
+
     // Now start the main read/write loop! In this example, we pass the input buffer directly to
     // the output buffer, so watch out for feedback.
     'stream: loop {
 
-        // How many frames are available on the input stream?
-        let in_frames = wait_for_stream(|| stream.read_available(), "Read");
+        // how many samples are available on the input stream?
+        let num_input_samples = wait_for_stream(|| stream.read_available(), "Read");
 
-        // If there are frames available, let's take them and add them to our buffer.
-        if in_frames > 0 {
-            let input_samples = try!(stream.read(in_frames));
-            buffer.extend(input_samples.into_iter());
-            println!("Read {:?} frames from the input stream.", in_frames);
+        // if there are samples available, let's take them and add them to the buffer
+        if num_input_samples > 0 {
+            let samples = try!(stream.read(num_input_samples));
+            for sample in samples {
+                println!("Sample {:?}", sample);
+                buffer.push(*sample);
+            }
+            println!("Read {:?} samples from the input stream.", num_input_samples);
             println!("Time: {}", stream.time());
         }
 
-        // How many frames do we have so far?
-        let buffer_frames = (buffer.len() / CHANNELS as usize) as u32;
+        let signal = signal::from_interleaved_samples_iter::<_, [f32; CHANNELS as usize]>(
+            buffer.iter().map(|item|*item)
+        );
     }
-
 }
