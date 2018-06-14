@@ -1,16 +1,3 @@
 #!/bin/bash
 
-# https://unix.stackexchange.com/questions/163561/control-which-process-gets-cancelled-by-ctrlc#comment272255_165715
-set -m
-
-# with help from https://askubuntu.com/questions/8425/how-to-temporarily-disable-pulseaudio
-
-systemctl --user stop pulseaudio.socket
-systemctl --user stop pulseaudio.service
-echo "autospawn = no" > $HOME/.config/pulse/client.conf
-pulseaudio --kill
-cargo run
-rm $HOME/.config/pulse/client.conf
-systemctl --user start pulseaudio.socket
-systemctl --user start pulseaudio.service
-# pulseaudio --start
+pasuspender -- sleep 0.1 && cargo run

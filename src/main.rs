@@ -7,7 +7,7 @@ extern crate portaudio;
 extern crate sample;
 
 use portaudio as pa;
-use sample::{Sample, Signal, signal};
+use sample::{envelope, Sample, Signal, signal};
 use sample::ring_buffer;
 use std::collections::VecDeque;
 
@@ -49,7 +49,7 @@ fn run() -> Result<(), pa::Error> {
     // Check that the stream format is supported.
     try!(pa.is_input_format_supported(input_params, SAMPLE_RATE));
 
-    // Construct the settings with which we'll open our duplex stream.
+    // Construct the settings with which we'll open our input stream.
     let settings = pa::InputStreamSettings::new(input_params, SAMPLE_RATE, FRAMES);
 
     let mut stream = try!(pa.open_blocking_stream(settings));
@@ -83,20 +83,28 @@ fn run() -> Result<(), pa::Error> {
 
         // how many samples are available on the input stream?
         let num_input_samples = wait_for_stream(|| stream.read_available(), "Read");
+        // println!("Available samples: {:?}", num_input_samples);
 
         // if there are samples available, let's take them and add them to the buffer
         if num_input_samples > 0 {
             let samples = try!(stream.read(num_input_samples));
             for sample in samples {
-                println!("Sample {:?}", sample);
+                // println!("Sample {:?}", sample);
                 buffer.push(*sample);
             }
-            println!("Read {:?} samples from the input stream.", num_input_samples);
-            println!("Time: {}", stream.time());
+            // println!("Read samples: {:?}", num_input_samples);
+            // println!("Time: {}", stream.time());
         }
 
         let signal = signal::from_interleaved_samples_iter::<_, [f32; CHANNELS as usize]>(
             buffer.iter().map(|item|*item)
         );
+
+        let attack = 1.0;
+        let release = 1.0;
+        let detector = envelope::Detector::peak(attack, release);
+        let mut envelope = signal.detect_envelope(detector);
+        let values = envelope.take(2).collect::<Vec<_>>();
+        println!("Envelope: {:?}", values);
     }
 }
