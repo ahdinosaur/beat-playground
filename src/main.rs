@@ -8,6 +8,7 @@ extern crate sample;
 
 use portaudio as pa;
 use sample::{envelope, Sample, Signal, signal};
+use sample::frame;
 use sample::ring_buffer;
 use std::collections::VecDeque;
 
@@ -33,7 +34,8 @@ fn run() -> Result<(), pa::Error> {
 
     let pa_reader = PortAudioReader::new();
 
-    for signal in pa_reader {
+    for sample in pa_reader {
+        println!("Sample: {:?}", sample);
     }
 
     Ok(())
@@ -41,6 +43,8 @@ fn run() -> Result<(), pa::Error> {
 
 struct PortAudioReader {
     stream: pa::Stream<pa::Blocking<pa::stream::Buffer>, pa::Input<f32>>,
+    next_buffer: Option<pa::stream::Buffer>,
+    next_buffer_index: usize,
 }
 
 impl PortAudioReader {
@@ -72,35 +76,53 @@ impl PortAudioReader {
         let mut stream = try!(pa.open_blocking_stream(settings));
         
         Ok(PortAudioReader {
-            stream
+            stream,
+            next_buffer: None,
+            next_buffer_index: 0,
         })
     }
 
     fn start (&self) -> Result<(), pa::Error> {
         self.stream.start()
     }
-}
 
-impl Iterator for PortAudioReader {
-    type Item = Box<Signal<Frame=Stereo<f32>>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+    fn read_next_buffer (&self) -> Result<Option<pa::stream::Buffer>, pa::Error> {
         // how many samples are available on the input stream?
         let num_input_samples = wait_for_stream(|| self.stream.read_available(), "Read");
         // println!("Available samples: {:?}", num_input_samples);
         
-        if num_input_samples == 0 { return None }
+        if num_input_samples == 0 { return Ok(None) }
 
         // if there are samples available, let's take them and add them to the buffer
-        // TODO wrap
-        let samples = self.stream.read(num_input_samples).unwrap();
+        let buffer = try!(self.stream.read(num_input_samples));
 
         // println!("Read samples: {:?}", num_input_samples);
         // println!("Time: {}", stream.time());
+        
+        Ok(Some(buffer))
+    }
+}
 
-        let signal = signal::from_interleaved_samples_iter::<_, [f32; CHANNELS as usize]>(samples);
+impl Iterator for PortAudioReader {
+    type Item = Box<Signal<Frame=frame::Stereo<f32>>>;
 
-        Some(Box::new(signal))
+    fn next(&mut self) -> Option<Self::Item> {
+        if (
+            self.next_buffer.is_none() ||
+            self.next_buffer_index > self.next_buffer.unwrap().len() - 1
+        ) {
+            self.next_buffer = self.read_next_buffer.unwrap();
+        }
+
+        if let Some(next_buffer) = self.next_buffer {
+            let next_sample = self.next_buffer.get(self.next_buffer_index).to_sample();
+
+            self.next_buffer_index += 1;
+
+            next_sample
+        } else {
+            None
+        }
     }
 }
 
