@@ -28,83 +28,95 @@ fn main() {
 
 fn run() -> Result<(), pa::Error> {
 
-    let pa = try!(pa::PortAudio::new());
-
-    println!("PortAudio");
-    println!("version: {}", pa.version());
-    println!("version text: {:?}", pa.version_text());
-    println!("host count: {}", try!(pa.host_api_count()));
-
-    let default_host = try!(pa.default_host_api());
-    println!("default host: {:#?}", pa.host_api_info(default_host));
-
-    let def_input = try!(pa.default_input_device());
-    let input_info = try!(pa.device_info(def_input));
-    println!("Default input device info: {:#?}", &input_info);
-
-    // Construct the input stream parameters.
-    let latency = input_info.default_low_input_latency;
-    let input_params = pa::StreamParameters::<f32>::new(def_input, CHANNELS, INTERLEAVED, latency);
-
-    // Check that the stream format is supported.
-    try!(pa.is_input_format_supported(input_params, SAMPLE_RATE));
-
-    // Construct the settings with which we'll open our input stream.
-    let settings = pa::InputStreamSettings::new(input_params, SAMPLE_RATE, FRAMES);
-
-    let mut stream = try!(pa.open_blocking_stream(settings));
-
     // read samples into a ring_buffer: https://github.com/RustAudio/sample/blob/master/src/ring_buffer.rs
-    let mut buffer = ring_buffer::Fixed::from([Sample::equilibrium(); MAX_SAMPLES_PER_BEAT * CHANNELS as usize]);
+    // let mut buffer = ring_buffer::Fixed::from([Sample::equilibrium(); MAX_SAMPLES_PER_BEAT * CHANNELS as usize]);
 
-    try!(stream.start());
+    let pa_reader = PortAudioReader::new();
 
-    // We'll use this function to wait for read/write availability.
-    fn wait_for_stream<F>(f: F, name: &str) -> u32
-        where F: Fn() -> Result<pa::StreamAvailable, pa::error::Error>
-    {
-        'waiting_for_stream: loop {
-            match f() {
-                Ok(available) => match available {
-                    pa::StreamAvailable::Frames(frames) => return frames as u32,
-                    pa::StreamAvailable::InputOverflowed => println!("Input stream has overflowed"),
-                    pa::StreamAvailable::OutputUnderflowed => println!("Output stream has underflowed"),
-                },
-                Err(err) => panic!("An error occurred while waiting for the {} stream: {}", name, err),
-            }
-        }
-    };
+    for signal in pa_reader {
+    }
 
-    let mut i = 0;
+    Ok(())
+}
 
-    // Now start the main read/write loop! In this example, we pass the input buffer directly to
-    // the output buffer, so watch out for feedback.
-    'stream: loop {
+struct PortAudioReader {
+    stream: pa::Stream<pa::Blocking<pa::stream::Buffer>, pa::Input<f32>>,
+}
 
+impl PortAudioReader {
+    fn new() -> Result<Self, pa::Error> {
+        let pa = try!(pa::PortAudio::new());
+
+        println!("PortAudio");
+        println!("version: {}", pa.version());
+        println!("version text: {:?}", pa.version_text());
+        println!("host count: {}", try!(pa.host_api_count()));
+
+        let default_host = try!(pa.default_host_api());
+        println!("default host: {:#?}", pa.host_api_info(default_host));
+
+        let def_input = try!(pa.default_input_device());
+        let input_info = try!(pa.device_info(def_input));
+        println!("Default input device info: {:#?}", &input_info);
+
+        // Construct the input stream parameters.
+        let latency = input_info.default_low_input_latency;
+        let input_params = pa::StreamParameters::<f32>::new(def_input, CHANNELS, INTERLEAVED, latency);
+
+        // Check that the stream format is supported.
+        try!(pa.is_input_format_supported(input_params, SAMPLE_RATE));
+
+        // Construct the settings with which we'll open our input stream.
+        let settings = pa::InputStreamSettings::new(input_params, SAMPLE_RATE, FRAMES);
+
+        let mut stream = try!(pa.open_blocking_stream(settings));
+        
+        Ok(PortAudioReader {
+            stream
+        })
+    }
+
+    fn start (&self) -> Result<(), pa::Error> {
+        self.stream.start()
+    }
+}
+
+impl Iterator for PortAudioReader {
+    type Item = Box<Signal<Frame=Stereo<f32>>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
         // how many samples are available on the input stream?
-        let num_input_samples = wait_for_stream(|| stream.read_available(), "Read");
+        let num_input_samples = wait_for_stream(|| self.stream.read_available(), "Read");
         // println!("Available samples: {:?}", num_input_samples);
+        
+        if num_input_samples == 0 { return None }
 
         // if there are samples available, let's take them and add them to the buffer
-        if num_input_samples > 0 {
-            let samples = try!(stream.read(num_input_samples));
-            for sample in samples {
-                // println!("Sample {:?}", sample);
-                buffer.push(*sample);
-            }
-            // println!("Read samples: {:?}", num_input_samples);
-            // println!("Time: {}", stream.time());
+        // TODO wrap
+        let samples = self.stream.read(num_input_samples).unwrap();
+
+        // println!("Read samples: {:?}", num_input_samples);
+        // println!("Time: {}", stream.time());
+
+        let signal = signal::from_interleaved_samples_iter::<_, [f32; CHANNELS as usize]>(samples);
+
+        Some(Box::new(signal))
+    }
+}
+
+
+// We'll use this function to wait for read/write availability.
+fn wait_for_stream<F>(f: F, name: &str) -> u32
+    where F: Fn() -> Result<pa::StreamAvailable, pa::error::Error>
+{
+    'waiting_for_stream: loop {
+        match f() {
+            Ok(available) => match available {
+                pa::StreamAvailable::Frames(frames) => return frames as u32,
+                pa::StreamAvailable::InputOverflowed => println!("Input stream has overflowed"),
+                pa::StreamAvailable::OutputUnderflowed => println!("Output stream has underflowed"),
+            },
+            Err(err) => panic!("An error occurred while waiting for the {} stream: {}", name, err),
         }
-
-        let signal = signal::from_interleaved_samples_iter::<_, [f32; CHANNELS as usize]>(
-            buffer.iter().map(|item|*item)
-        );
-
-        let attack = 1.0;
-        let release = 1.0;
-        let detector = envelope::Detector::peak(attack, release);
-        let mut envelope = signal.detect_envelope(detector);
-        let values = envelope.take(2).collect::<Vec<_>>();
-        println!("Envelope: {:?}", values);
     }
 }
