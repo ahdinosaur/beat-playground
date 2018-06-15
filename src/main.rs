@@ -11,6 +11,7 @@ use sample::{envelope, Sample, Signal, signal};
 use sample::frame;
 use sample::ring_buffer;
 use std::collections::VecDeque;
+use std::marker;
 
 const SAMPLE_RATE: f64 = 44_100.0;
 const CHANNELS: i32 = 2;
@@ -32,22 +33,23 @@ fn run() -> Result<(), pa::Error> {
     // read samples into a ring_buffer: https://github.com/RustAudio/sample/blob/master/src/ring_buffer.rs
     // let mut buffer = ring_buffer::Fixed::from([Sample::equilibrium(); MAX_SAMPLES_PER_BEAT * CHANNELS as usize]);
 
-    let pa_reader = PortAudioReader::new();
+    let pa_reader = try!(PortAudioReader::new());
 
-    for sample in pa_reader {
-        println!("Sample: {:?}", sample);
+    for signal in pa_reader {
+        for sample in signal.until_exhausted() {
+            println!("Sample: {:?}", sample);
+        }
     }
 
     Ok(())
 }
 
-struct PortAudioReader {
+struct PortAudioReader<'a> {
     stream: pa::Stream<pa::Blocking<pa::stream::Buffer>, pa::Input<f32>>,
-    next_buffer: Option<pa::stream::Buffer>,
-    next_buffer_index: usize,
+    _marker: marker::PhantomData<Signal<Frame=[f32; CHANNELS as usize]> + 'a>
 }
 
-impl PortAudioReader {
+impl<'a> PortAudioReader<'a> {
     fn new() -> Result<Self, pa::Error> {
         let pa = try!(pa::PortAudio::new());
 
@@ -77,8 +79,7 @@ impl PortAudioReader {
         
         Ok(PortAudioReader {
             stream,
-            next_buffer: None,
-            next_buffer_index: 0,
+            _marker: marker::PhantomData
         })
     }
 
@@ -86,7 +87,7 @@ impl PortAudioReader {
         self.stream.start()
     }
 
-    fn read_next_buffer (&self) -> Result<Option<pa::stream::Buffer>, pa::Error> {
+    fn read_next_buffer (&self) -> Result<Option<&[f32]>, pa::Error> {
         // how many samples are available on the input stream?
         let num_input_samples = wait_for_stream(|| self.stream.read_available(), "Read");
         // println!("Available samples: {:?}", num_input_samples);
@@ -103,25 +104,18 @@ impl PortAudioReader {
     }
 }
 
-impl Iterator for PortAudioReader {
-    type Item = Box<Signal<Frame=frame::Stereo<f32>>>;
+impl<'a> Iterator for PortAudioReader<'a> {
+    type Item = Box<Signal<Frame=[f32; CHANNELS as usize]> + 'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if (
-            self.next_buffer.is_none() ||
-            self.next_buffer_index > self.next_buffer.unwrap().len() - 1
-        ) {
-            self.next_buffer = self.read_next_buffer.unwrap();
-        }
-
-        if let Some(next_buffer) = self.next_buffer {
-            let next_sample = self.next_buffer.get(self.next_buffer_index).to_sample();
-
-            self.next_buffer_index += 1;
-
-            next_sample
-        } else {
-            None
+        match self.read_next_buffer() {
+            Ok(Some(buffer)) => {
+                let interleaved_samples_iter = buffer.iter().cloned();
+                let signal = signal::from_interleaved_samples_iter::<_, [f32; CHANNELS as usize]>(interleaved_samples_iter);
+                Some(Box::new(signal))
+            },
+            Ok(None) => None,
+            Err(err) => panic!(err),
         }
     }
 }
