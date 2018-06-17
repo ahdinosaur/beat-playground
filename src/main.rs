@@ -11,7 +11,7 @@ use sample::{envelope, Sample, Signal, signal};
 use sample::frame;
 use sample::ring_buffer;
 use std::collections::VecDeque;
-use std::marker;
+use std::iter;
 
 const SAMPLE_RATE: f64 = 44_100.0;
 const CHANNELS: i32 = 2;
@@ -35,12 +35,11 @@ fn run() -> Result<(), pa::Error> {
 
     let pa_reader = try!(PortAudioReader::new());
 
-    for signal in pa_reader.iter() {
-        println!("Signal!");
+    let signal = pa_reader.iter()
+        .flat_map(|s| s.until_exhausted());
 
-        for sample in signal.until_exhausted() {
-            println!("Sample!");
-        }
+    for sample in signal {
+        println!("Sample!");
     }
 
     Ok(())
@@ -94,8 +93,6 @@ impl PortAudioReader {
         PortAudioReaderIterator {
             stream: &self.stream
         }
-
-        .flat_map(|s| s.until_exhausted())
     }
 }
 
