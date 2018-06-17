@@ -12,6 +12,7 @@ use sample::frame;
 use sample::ring_buffer;
 use std::collections::VecDeque;
 use std::iter;
+use std::sync::mpsc;
 
 const SAMPLE_RATE: f64 = 44_100.0;
 const CHANNELS: i32 = 2;
@@ -33,27 +34,25 @@ fn run() -> Result<(), pa::Error> {
     // read samples into a ring_buffer: https://github.com/RustAudio/sample/blob/master/src/ring_buffer.rs
     // let mut buffer = ring_buffer::Fixed::from([Sample::equilibrium(); MAX_SAMPLES_PER_BEAT * CHANNELS as usize]);
 
-    let pa_reader = try!(PortAudioReader::new());
+    let pa_reader = try!(PortAudioReader::start());
 
     let signal = pa_reader.iter()
         .flat_map(|s| s.until_exhausted());
 
     for sample in signal {
-        println!("Sample!");
+        println!("Sample! {:?}", sample);
     }
 
     Ok(())
 }
 
-// TODO streaming iterator?
-// or store buffer in iterator
-
 struct PortAudioReader {
-    stream: pa::Stream<pa::Blocking<pa::stream::Buffer>, pa::Input<f32>>,
+    stream: pa::Stream<pa::NonBlocking, pa::Input<f32>>,
+    receiver: mpsc::Receiver<Vec<f32>>
 }
 
 impl PortAudioReader {
-    fn new() -> Result<Self, pa::Error> {
+    fn start() -> Result<Self, pa::Error> {
         let pa = try!(pa::PortAudio::new());
 
         println!("PortAudio");
@@ -65,55 +64,69 @@ impl PortAudioReader {
         println!("default host: {:#?}", pa.host_api_info(default_host));
 
         let def_input = try!(pa.default_input_device());
-        let input_info = try!(pa.device_info(def_input));
-        println!("Default input device info: {:#?}", &input_info);
+        let info = try!(pa.device_info(def_input));
+        println!("Default input device info: {:#?}", &info);
 
         // Construct the input stream parameters.
-        let latency = input_info.default_low_input_latency;
-        let input_params = pa::StreamParameters::<f32>::new(def_input, CHANNELS, INTERLEAVED, latency);
+        let latency = info.default_low_input_latency;
+        let params = pa::StreamParameters::<f32>::new(def_input, CHANNELS, INTERLEAVED, latency);
 
         // Check that the stream format is supported.
-        try!(pa.is_input_format_supported(input_params, SAMPLE_RATE));
+        try!(pa.is_input_format_supported(params, SAMPLE_RATE));
 
         // Construct the settings with which we'll open our input stream.
-        let settings = pa::InputStreamSettings::new(input_params, SAMPLE_RATE, FRAMES);
+        let settings = pa::InputStreamSettings::new(params, SAMPLE_RATE, FRAMES);
 
-        let mut stream = try!(pa.open_blocking_stream(settings));
+        // We'll use this channel to send the samples back to the main thread.
+        let (sender, receiver) = ::std::sync::mpsc::channel();
+
+        // A callback to pass to the non-blocking input stream.
+        let callback = move |pa::InputStreamCallbackArgs { buffer, frames, .. }| {
+            assert!(frames == FRAMES as usize);
+
+            // We'll construct a copy of the input buffer and send that
+            // onto the channel. This doesn't block, even though nothing
+            // is waiting on the receiver yet.
+            let vec_buffer = Vec::from(buffer);
+            // There are actually 512 samples here. 256 for the left, 256 for the right.
+            assert!(vec_buffer.len() == FRAMES as usize * CHANNELS as usize);
+
+            // If sending fails (the receiver has been dropped), stop recording
+            match sender.send(vec_buffer) {
+                Ok(_) => pa::Continue,
+                Err(_) => pa::Complete
+            }
+        };
+
+
+        // Construct a stream with input sample types of f32.
+        let mut stream = try!(pa.open_non_blocking_stream(settings, callback));
+
+        try!(stream.start());
         
         Ok(PortAudioReader {
-            stream
+            stream,
+            receiver
         })
-    }
-
-    fn start (&mut self) -> Result<(), pa::Error> {
-        self.stream.start()
     }
 
     fn iter (&self) -> PortAudioReaderIterator {
         PortAudioReaderIterator {
-            stream: &self.stream
+            stream: &self.stream,
+            receiver: &self.receiver
         }
     }
 }
 
 
 struct PortAudioReaderIterator<'a> {
-    stream: &'a pa::Stream<pa::Blocking<pa::stream::Buffer>, pa::Input<f32>>,
+    stream: &'a pa::Stream<pa::NonBlocking, pa::Input<f32>>,
+    receiver: &'a mpsc::Receiver<Vec<f32>>
 }
 
 impl<'a> PortAudioReaderIterator<'a> {
-    fn read_next_buffer (&self) -> Result<&'a [f32], pa::Error> {
-        // how many samples are available on the input stream?
-        let num_input_samples = wait_for_stream(|| self.stream.read_available(), "Read");
-        // println!("Available samples: {:?}", num_input_samples);
-
-        // if there are samples available, let's take them and add them to the buffer
-        let buffer = try!(self.stream.read(num_input_samples));
-
-        // println!("Read samples: {:?}", num_input_samples);
-        // println!("Time: {}", stream.time());
-        
-        Ok(buffer)
+    fn read_next_buffer (&self) -> Result<Vec<f32>, mpsc::RecvError> {
+        self.receiver.recv()
     }
 }
 
@@ -121,35 +134,12 @@ impl<'a> Iterator for PortAudioReaderIterator<'a> {
     type Item = Box<Signal<Frame=[f32; CHANNELS as usize]> + 'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        println!("next!");
         match self.read_next_buffer() {
             Ok(buffer) => {
-                let interleaved_samples_iter = buffer.iter().cloned();
-                let signal = signal::from_interleaved_samples_iter::<_, [f32; CHANNELS as usize]>(interleaved_samples_iter);
+                let signal = signal::from_interleaved_samples_iter::<_, [f32; CHANNELS as usize]>(buffer.into_iter());
                 Some(Box::new(signal))
             },
             Err(err) => panic!(err),
-        }
-    }
-}
-
-
-// We'll use this function to wait for read/write availability.
-fn wait_for_stream<F>(f: F, name: &str) -> u32
-    where F: Fn() -> Result<pa::StreamAvailable, pa::error::Error>
-{
-    'waiting_for_stream: loop {
-        match f() {
-            Ok(available) => match available {
-                pa::StreamAvailable::Frames(frames) => {
-//                    println!("frames {}", frames);
-                    if frames == 0 { continue }
-                    else { return frames as u32 }
-                },
-                pa::StreamAvailable::InputOverflowed => println!("Input stream has overflowed"),
-                pa::StreamAvailable::OutputUnderflowed => println!("Output stream has underflowed"),
-            },
-            Err(err) => panic!("An error occurred while waiting for the {} stream: {}", name, err),
         }
     }
 }
