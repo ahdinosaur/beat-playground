@@ -1,6 +1,30 @@
+# beat-playground
+
+## setup
+
 ```
 sudo apt install portaudio19-dev
 ```
+
+## run
+
+```
+cargo run
+```
+
+use `./bin/run` if you want to disable pulseaudio while running
+
+## todo
+
+- window(window_size = 2048, hop_size = 512)
+  - iterator to return signals
+- energy of a frame
+- dft of a frame
+- find onsets
+- feed into dagara
+  - phase deviation
+  - spectral difference
+  - complex-domain
 
 ## resources
 
@@ -19,15 +43,3 @@ sudo apt install portaudio19-dev
 - \* http://citeseerx.ist.psu.edu/viewdoc/summary?doi=10.1.1.331.6942
   - referenced by above as the onset detection algorithm
 
-
-## plan
-
-- window(window_size = 2048, hop_size = 512)
-  - iterator to return signals
-- energy of a frame
-- dft of a frame
-- find onsets
-- feed into dagara
-  - phase deviation
-  - spectral difference
-  - complex-domain
