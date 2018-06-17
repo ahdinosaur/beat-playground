@@ -36,20 +36,27 @@ fn run() -> Result<(), pa::Error> {
 
     let pa_reader = try!(PortAudioReader::start());
 
-    let signal = pa_reader.iter()
-        .flat_map(|s| s.until_exhausted());
+    let signal = pa_reader.signal();
 
-    for sample in signal {
+    for sample in signal.until_exhausted() {
         println!("Sample! {:?}", sample);
     }
 
     Ok(())
 }
 
+struct Windower {
+}
+
 struct PortAudioReader {
     stream: pa::Stream<pa::NonBlocking, pa::Input<f32>>,
     receiver: mpsc::Receiver<Vec<f32>>
 }
+
+type PortAudioSample = f32;
+type PortAudioFrame = [PortAudioSample; CHANNELS as usize];
+type PortAudioInterleavedFrames = Vec<PortAudioSample>;
+type PortAudioSignal<'a> = Box<Signal<Frame=PortAudioFrame> + 'a>;
 
 impl PortAudioReader {
     fn start() -> Result<Self, pa::Error> {
@@ -69,7 +76,7 @@ impl PortAudioReader {
 
         // Construct the input stream parameters.
         let latency = info.default_low_input_latency;
-        let params = pa::StreamParameters::<f32>::new(def_input, CHANNELS, INTERLEAVED, latency);
+        let params = pa::StreamParameters::<PortAudioSample>::new(def_input, CHANNELS, INTERLEAVED, latency);
 
         // Check that the stream format is supported.
         try!(pa.is_input_format_supported(params, SAMPLE_RATE));
@@ -116,27 +123,34 @@ impl PortAudioReader {
             receiver: &self.receiver
         }
     }
+
+    fn signal (&self) -> PortAudioSignal {
+        Box::new(signal::from_iter(
+            self.iter()
+                .flat_map(|s| s.until_exhausted())
+        ))
+    }
 }
 
 
 struct PortAudioReaderIterator<'a> {
-    stream: &'a pa::Stream<pa::NonBlocking, pa::Input<f32>>,
-    receiver: &'a mpsc::Receiver<Vec<f32>>
+    stream: &'a pa::Stream<pa::NonBlocking, pa::Input<PortAudioSample>>,
+    receiver: &'a mpsc::Receiver<PortAudioInterleavedFrames>
 }
 
 impl<'a> PortAudioReaderIterator<'a> {
-    fn read_next_buffer (&self) -> Result<Vec<f32>, mpsc::RecvError> {
+    fn read_next_buffer (&self) -> Result<PortAudioInterleavedFrames, mpsc::RecvError> {
         self.receiver.recv()
     }
 }
 
 impl<'a> Iterator for PortAudioReaderIterator<'a> {
-    type Item = Box<Signal<Frame=[f32; CHANNELS as usize]> + 'a>;
+    type Item = PortAudioSignal<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.read_next_buffer() {
             Ok(buffer) => {
-                let signal = signal::from_interleaved_samples_iter::<_, [f32; CHANNELS as usize]>(buffer.into_iter());
+                let signal = signal::from_interleaved_samples_iter::<_, PortAudioFrame>(buffer.into_iter());
                 Some(Box::new(signal))
             },
             Err(err) => panic!(err),
