@@ -11,6 +11,7 @@ use sample::{envelope, Sample, Signal, signal};
 use sample::frame;
 use sample::ring_buffer;
 use std::collections::VecDeque;
+use std::marker;
 
 const SAMPLE_RATE: f64 = 44_100.0;
 const CHANNELS: i32 = 2;
@@ -20,7 +21,7 @@ const MAX_SAMPLES_PER_BEAT: usize = 1024;
 
 fn main() {
     match run() {
-        Ok(()) => {},
+        Ok(_) => {},
         e => {
             eprintln!("Example failed with the following: {:?}", e);
         }
@@ -93,6 +94,8 @@ impl PortAudioReader {
         PortAudioReaderIterator {
             stream: &self.stream
         }
+
+        .flat_map(|s| s.until_exhausted())
     }
 }
 
@@ -102,12 +105,10 @@ struct PortAudioReaderIterator<'a> {
 }
 
 impl<'a> PortAudioReaderIterator<'a> {
-    fn read_next_buffer (&self) -> Result<Option<&'a [f32]>, pa::Error> {
+    fn read_next_buffer (&self) -> Result<&'a [f32], pa::Error> {
         // how many samples are available on the input stream?
         let num_input_samples = wait_for_stream(|| self.stream.read_available(), "Read");
         // println!("Available samples: {:?}", num_input_samples);
-        
-        if num_input_samples == 0 { return Ok(None); }
 
         // if there are samples available, let's take them and add them to the buffer
         let buffer = try!(self.stream.read(num_input_samples));
@@ -115,7 +116,7 @@ impl<'a> PortAudioReaderIterator<'a> {
         // println!("Read samples: {:?}", num_input_samples);
         // println!("Time: {}", stream.time());
         
-        Ok(Some(buffer))
+        Ok(buffer)
     }
 }
 
@@ -123,18 +124,14 @@ impl<'a> Iterator for PortAudioReaderIterator<'a> {
     type Item = Box<Signal<Frame=[f32; CHANNELS as usize]> + 'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        'waiting_for_next: loop {
-            match self.read_next_buffer() {
-                Ok(Some(buffer)) => {
-                    let interleaved_samples_iter = buffer.iter().cloned();
-                    let signal = signal::from_interleaved_samples_iter::<_, [f32; CHANNELS as usize]>(interleaved_samples_iter);
-                    return Some(Box::new(signal))
-                },
-                Ok(None) => {
-                    println!("No signal");
-                },
-                Err(err) => panic!(err),
-            }
+        println!("next!");
+        match self.read_next_buffer() {
+            Ok(buffer) => {
+                let interleaved_samples_iter = buffer.iter().cloned();
+                let signal = signal::from_interleaved_samples_iter::<_, [f32; CHANNELS as usize]>(interleaved_samples_iter);
+                Some(Box::new(signal))
+            },
+            Err(err) => panic!(err),
         }
     }
 }
@@ -147,7 +144,11 @@ fn wait_for_stream<F>(f: F, name: &str) -> u32
     'waiting_for_stream: loop {
         match f() {
             Ok(available) => match available {
-                pa::StreamAvailable::Frames(frames) => return frames as u32,
+                pa::StreamAvailable::Frames(frames) => {
+//                    println!("frames {}", frames);
+                    if frames == 0 { continue }
+                    else { return frames as u32 }
+                },
                 pa::StreamAvailable::InputOverflowed => println!("Input stream has overflowed"),
                 pa::StreamAvailable::OutputUnderflowed => println!("Output stream has underflowed"),
             },
