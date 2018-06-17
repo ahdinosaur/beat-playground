@@ -35,10 +35,9 @@ fn run() -> Result<(), pa::Error> {
     let pa_reader = try!(PortAudioReader::new());
 
     for signal in pa_reader.iter() {
-        if signal.is_none() { continue; }
         println!("Signal!");
 
-        for sample in signal.unwrap().until_exhausted() {
+        for sample in signal.until_exhausted() {
             println!("Sample!");
         }
     }
@@ -121,7 +120,7 @@ impl<'a> PortAudioReaderIterator<'a> {
 }
 
 impl<'a> Iterator for PortAudioReaderIterator<'a> {
-    type Item = Option<Box<Signal<Frame=[f32; CHANNELS as usize]> + 'a>>;
+    type Item = Box<Signal<Frame=[f32; CHANNELS as usize]> + 'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         'waiting_for_next: loop {
@@ -129,11 +128,10 @@ impl<'a> Iterator for PortAudioReaderIterator<'a> {
                 Ok(Some(buffer)) => {
                     let interleaved_samples_iter = buffer.iter().cloned();
                     let signal = signal::from_interleaved_samples_iter::<_, [f32; CHANNELS as usize]>(interleaved_samples_iter);
-                    return Some(Some(Box::new(signal)))
+                    return Some(Box::new(signal))
                 },
                 Ok(None) => {
                     println!("No signal");
-                    return Some(None);
                 },
                 Err(err) => panic!(err),
             }
