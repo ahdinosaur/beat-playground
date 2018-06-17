@@ -35,21 +35,25 @@ fn run() -> Result<(), pa::Error> {
 
     let pa_reader = try!(PortAudioReader::new());
 
-    for signal in pa_reader {
+    for signal in pa_reader.iter() {
+        println!("Signal!");
+
         for sample in signal.until_exhausted() {
-            println!("Sample: {:?}", sample);
+            println!("Sample!");
         }
     }
 
     Ok(())
 }
 
-struct PortAudioReader<'a> {
+// TODO streaming iterator?
+// or store buffer in iterator
+
+struct PortAudioReader {
     stream: pa::Stream<pa::Blocking<pa::stream::Buffer>, pa::Input<f32>>,
-    _marker: marker::PhantomData<Signal<Frame=[f32; CHANNELS as usize]> + 'a>
 }
 
-impl<'a> PortAudioReader<'a> {
+impl PortAudioReader {
     fn new() -> Result<Self, pa::Error> {
         let pa = try!(pa::PortAudio::new());
 
@@ -78,16 +82,28 @@ impl<'a> PortAudioReader<'a> {
         let mut stream = try!(pa.open_blocking_stream(settings));
         
         Ok(PortAudioReader {
-            stream,
-            _marker: marker::PhantomData
+            stream
         })
     }
 
-    fn start (&self) -> Result<(), pa::Error> {
+    fn start (&mut self) -> Result<(), pa::Error> {
         self.stream.start()
     }
 
-    fn read_next_buffer (&self) -> Result<Option<&[f32]>, pa::Error> {
+    fn iter (&self) -> PortAudioReaderIterator {
+        PortAudioReaderIterator {
+            stream: &self.stream
+        }
+    }
+}
+
+
+struct PortAudioReaderIterator<'a> {
+    stream: &'a pa::Stream<pa::Blocking<pa::stream::Buffer>, pa::Input<f32>>,
+}
+
+impl<'a> PortAudioReaderIterator<'a> {
+    fn read_next_buffer (&self) -> Result<Option<&'a [f32]>, pa::Error> {
         // how many samples are available on the input stream?
         let num_input_samples = wait_for_stream(|| self.stream.read_available(), "Read");
         // println!("Available samples: {:?}", num_input_samples);
@@ -104,10 +120,11 @@ impl<'a> PortAudioReader<'a> {
     }
 }
 
-impl<'a> Iterator for PortAudioReader<'a> {
+impl<'a> Iterator for PortAudioReaderIterator<'a> {
     type Item = Box<Signal<Frame=[f32; CHANNELS as usize]> + 'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        println!("next!");
         match self.read_next_buffer() {
             Ok(Some(buffer)) => {
                 let interleaved_samples_iter = buffer.iter().cloned();
